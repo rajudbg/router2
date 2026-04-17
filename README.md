@@ -63,6 +63,19 @@ export GOOGLE_APPLICATION_CREDENTIALS="/absolute/path/to/key.json"
 
 On Render, add `GOOGLE_APPLICATION_CREDENTIALS` as an environment variable pointing to your mounted key path, or use Render's supported secret/file mechanism for credentials.
 
+### Alternative for Render: base64 credentials
+
+If you cannot mount a credentials file, set `GOOGLE_CREDENTIALS_BASE64` to a base64-encoded service account JSON.
+At startup, Router2 will decode it, write `/tmp/router2-gcp-key.json`, and set `GOOGLE_APPLICATION_CREDENTIALS` automatically.
+
+Example to generate base64 from a local key file:
+
+```bash
+base64 -i key.json | tr -d '\n'
+```
+
+Paste the resulting single-line value into Render env var `GOOGLE_CREDENTIALS_BASE64` (no quotes).
+
 ## Install and Run Locally
 
 ```bash

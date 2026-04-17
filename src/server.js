@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { bootstrapGoogleCredentials } from "./bootstrapCredentials.js";
 import { validateApiKey } from "./auth.js";
 import {
   toOpenAIImagesRequest,
@@ -16,6 +17,8 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+
+bootstrapGoogleCredentials();
 
 app.use(express.json({ limit: "10mb" }));
 
