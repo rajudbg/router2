@@ -108,8 +108,12 @@ export async function generateTextFromVertex(contents, model) {
 }
 
 async function generateWithGeminiImage(client, prompt, n, model) {
+  if (!model) {
+    throw new Error("Invalid request: GEMINI_IMAGE_MODEL is required for Gemini image generation");
+  }
+
   const request = {
-    model: getModelPath(model || process.env.GEMINI_IMAGE_MODEL || "gemini-2.0-flash-preview-image-generation"),
+    model: getModelPath(model),
     contents: [
       {
         role: "user",
@@ -156,8 +160,13 @@ export async function generateImagesFromVertex({ prompt, n, model }) {
   const resolvedModel =
     model ||
     process.env.GEMINI_IMAGE_MODEL ||
-    process.env.IMAGEN_MODEL ||
-    "gemini-2.0-flash-preview-image-generation";
+    process.env.IMAGEN_MODEL;
+
+  if (!resolvedModel) {
+    throw new Error(
+      "Invalid request: set model in request or configure GEMINI_IMAGE_MODEL / IMAGEN_MODEL"
+    );
+  }
 
   if (isImagenModel(resolvedModel)) {
     return generateWithImagen(client, prompt, n, resolvedModel);
