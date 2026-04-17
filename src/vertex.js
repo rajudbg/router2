@@ -1,4 +1,4 @@
-import { v1 } from "@google-cloud/aiplatform";
+import { helpers, v1 } from "@google-cloud/aiplatform";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -141,8 +141,8 @@ async function generateWithImagen(client, prompt, n, model) {
   const endpoint = `projects/${projectId}/locations/${location}/publishers/google/models/${imagenModel}`;
   const request = {
     endpoint,
-    instances: [{ prompt }],
-    parameters: { sampleCount: n }
+    instances: [helpers.toValue({ prompt })],
+    parameters: helpers.toValue({ sampleCount: n })
   };
 
   const [response] = await client.predict(request, {
@@ -151,7 +151,8 @@ async function generateWithImagen(client, prompt, n, model) {
 
   const predictions = response?.predictions ?? [];
   return predictions
-    .map((prediction) => prediction?.structValue?.fields?.bytesBase64Encoded?.stringValue)
+    .map((prediction) => helpers.fromValue(prediction))
+    .map((prediction) => prediction?.bytesBase64Encoded)
     .filter((value) => typeof value === "string" && value.length > 0);
 }
 
