@@ -34,8 +34,8 @@ async function imageUrlToInlineData(url) {
   const bytes = Buffer.from(await response.arrayBuffer());
 
   return {
-    inline_data: {
-      mime_type: mimeType,
+    inlineData: {
+      mimeType,
       data: bytes.toString("base64")
     }
   };

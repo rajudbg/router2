@@ -17,6 +17,8 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+const debugErrors =
+  String(process.env.DEBUG_ERRORS || "false").toLowerCase() === "true";
 
 bootstrapGoogleCredentials();
 
@@ -51,12 +53,16 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
     return res.json(toOpenAIResponse(content));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("Vertex chat error:", error);
 
     if (message.startsWith("Invalid request:")) {
       return res.status(400).json({ error: message });
     }
 
-    return res.status(500).json({ error: "Vertex request failed" });
+    return res.status(500).json({
+      error: "Vertex request failed",
+      ...(debugErrors ? { details: message } : {})
+    });
   }
 });
 
@@ -84,12 +90,16 @@ app.post("/v1/images/generations", validateApiKey, async (req, res) => {
     return res.json(toOpenAIImagesResponse(images));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    console.error("Vertex image error:", error);
 
     if (message.startsWith("Invalid request:")) {
       return res.status(400).json({ error: message });
     }
 
-    return res.status(500).json({ error: "Vertex image generation failed" });
+    return res.status(500).json({
+      error: "Vertex image generation failed",
+      ...(debugErrors ? { details: message } : {})
+    });
   }
 });
 
