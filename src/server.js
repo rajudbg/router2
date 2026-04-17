@@ -12,7 +12,8 @@ import {
   generateImagesFromVertex,
   generateTextFromVertex,
   modelSupportsImageGeneration,
-  modelSupportsVisionInput
+  modelSupportsVisionInput,
+  VertexRequestError
 } from "./vertex.js";
 
 const app = express();
@@ -59,6 +60,16 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
       return res.status(400).json({ error: message });
     }
 
+    if (error instanceof VertexRequestError) {
+      return res.status(error.statusCode).json({
+        error:
+          error.statusCode === 429
+            ? "Vertex rate limited. Retry shortly."
+            : "Vertex temporarily unavailable. Retry shortly.",
+        ...(debugErrors ? { details: message, providerCode: error.providerCode } : {})
+      });
+    }
+
     return res.status(500).json({
       error: "Vertex request failed",
       ...(debugErrors ? { details: message } : {})
@@ -94,6 +105,16 @@ app.post("/v1/images/generations", validateApiKey, async (req, res) => {
 
     if (message.startsWith("Invalid request:")) {
       return res.status(400).json({ error: message });
+    }
+
+    if (error instanceof VertexRequestError) {
+      return res.status(error.statusCode).json({
+        error:
+          error.statusCode === 429
+            ? "Vertex rate limited. Retry shortly."
+            : "Vertex temporarily unavailable. Retry shortly.",
+        ...(debugErrors ? { details: message, providerCode: error.providerCode } : {})
+      });
     }
 
     return res.status(500).json({

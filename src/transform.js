@@ -1,5 +1,6 @@
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 20_000);
 const STRICT_IMAGE_MODE = String(process.env.STRICT_IMAGE_MODE || "false").toLowerCase() === "true";
+const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
 
 function detectMimeType(url, contentTypeHeader) {
   if (contentTypeHeader) {
@@ -18,20 +19,59 @@ async function fetchWithTimeout(url, timeoutMs = REQUEST_TIMEOUT_MS) {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "router2-image-fetch/1.0",
+        accept: "image/*,*/*;q=0.8"
+      }
+    });
     if (!response.ok) {
       throw new Error(`Image fetch failed with status ${response.status}`);
     }
+
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    if (contentLength > MAX_IMAGE_BYTES) {
+      throw new Error(
+        `Image fetch failed: content-length ${contentLength} exceeds limit ${MAX_IMAGE_BYTES}`
+      );
+    }
+
     return response;
   } finally {
     clearTimeout(timeout);
   }
 }
 
+function parseDataUrlImage(url) {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(url);
+  if (!match) {
+    return null;
+  }
+
+  const [, mimeType, data] = match;
+  return {
+    inlineData: {
+      mimeType,
+      data: data.trim()
+    }
+  };
+}
+
 async function imageUrlToInlineData(url) {
+  const dataUrlImage = parseDataUrlImage(url);
+  if (dataUrlImage) {
+    return dataUrlImage;
+  }
+
   const response = await fetchWithTimeout(url);
   const mimeType = detectMimeType(url, response.headers.get("content-type"));
   const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_IMAGE_BYTES) {
+    throw new Error(
+      `Image fetch failed: payload ${bytes.byteLength} bytes exceeds limit ${MAX_IMAGE_BYTES}`
+    );
+  }
 
   return {
     inlineData: {
@@ -96,7 +136,10 @@ export async function toVertexRequest(body) {
         parts.push(imagePart);
       } catch (error) {
         if (STRICT_IMAGE_MODE) {
-          throw new Error("Invalid request: image fetch failed. Cannot process vision request");
+          const reason = error instanceof Error ? error.message : "unknown image error";
+          throw new Error(
+            `Invalid request: image fetch failed. Cannot process vision request (${reason})`
+          );
         }
       }
     }

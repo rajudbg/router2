@@ -1,8 +1,20 @@
 import { helpers, v1 } from "@google-cloud/aiplatform";
 
 const REQUEST_TIMEOUT_MS = 10_000;
+const RETRYABLE_ERROR_CODES = new Set([4, 8, 13, 14]);
+const MAX_RETRIES = 3;
+const BASE_BACKOFF_MS = 500;
 
 const { PredictionServiceClient } = v1;
+
+export class VertexRequestError extends Error {
+  constructor(message, statusCode, providerCode) {
+    super(message);
+    this.name = "VertexRequestError";
+    this.statusCode = statusCode;
+    this.providerCode = providerCode;
+  }
+}
 
 function getModelPath(model) {
   const projectId = process.env.PROJECT_ID;
@@ -28,6 +40,48 @@ function createClient() {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function toVertexRequestError(error) {
+  const providerCode = error?.code;
+  const statusCode = providerCode === 8 ? 429 : 503;
+  const details =
+    typeof error?.details === "string" && error.details.trim()
+      ? error.details.trim()
+      : error instanceof Error
+        ? error.message
+        : "Vertex request failed";
+
+  return new VertexRequestError(details, statusCode, providerCode);
+}
+
+async function withRetry(operation) {
+  let lastError;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const code = error?.code;
+      const retryable = RETRYABLE_ERROR_CODES.has(code);
+      if (!retryable || attempt === MAX_RETRIES) {
+        break;
+      }
+
+      const jitter = Math.floor(Math.random() * 150);
+      const backoff = BASE_BACKOFF_MS * 2 ** attempt + jitter;
+      await sleep(backoff);
+    }
+  }
+
+  throw toVertexRequestError(lastError);
+}
+
 function extractResponseText(response) {
   const candidates = response?.candidates ?? [];
   const firstCandidate = candidates[0];
@@ -49,9 +103,11 @@ export async function generateFromVertex(contents) {
     contents
   };
 
-  const [response] = await client.generateContent(request, {
-    timeout: REQUEST_TIMEOUT_MS
-  });
+  const [response] = await withRetry(() =>
+    client.generateContent(request, {
+      timeout: REQUEST_TIMEOUT_MS
+    })
+  );
 
   return extractResponseText(response);
 }
@@ -100,9 +156,11 @@ export async function generateTextFromVertex(contents, model) {
     contents
   };
 
-  const [response] = await client.generateContent(request, {
-    timeout: REQUEST_TIMEOUT_MS
-  });
+  const [response] = await withRetry(() =>
+    client.generateContent(request, {
+      timeout: REQUEST_TIMEOUT_MS
+    })
+  );
 
   return extractResponseText(response);
 }
@@ -145,9 +203,11 @@ async function generateWithImagen(client, prompt, n, model) {
     parameters: helpers.toValue({ sampleCount: n })
   };
 
-  const [response] = await client.predict(request, {
-    timeout: REQUEST_TIMEOUT_MS
-  });
+  const [response] = await withRetry(() =>
+    client.predict(request, {
+      timeout: REQUEST_TIMEOUT_MS
+    })
+  );
 
   const predictions = response?.predictions ?? [];
   return predictions
