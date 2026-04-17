@@ -30,6 +30,10 @@ function classifyImageRoute(model) {
   return model.toLowerCase().startsWith("imagen") ? "imagen" : "gemini-image";
 }
 
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
   try {
     const hasImage = JSON.stringify(req.body).includes("image_url");

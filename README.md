@@ -16,6 +16,7 @@ OpenAI-compatible Node.js middleware that routes OpenClaw requests to Google Ver
 - OpenAI-compatible response shape
 - Runtime model routing (`model` in request body or env defaults)
 - Strict vision mode (`STRICT_IMAGE_MODE`) to prevent silent fallback
+- Vertex retry/backoff for transient upstream failures (`429/503`)
 - Render-ready (uses `process.env.PORT`)
 
 ## Project Structure
@@ -51,6 +52,9 @@ GEMINI_FLASH_MODEL=gemini-2.0-flash-001
 GEMINI_IMAGE_MODEL=gemini-2.0-flash-preview-image-generation
 IMAGEN_MODEL=imagen-3.0-generate-002
 STRICT_IMAGE_MODE=true
+IMAGE_FETCH_TIMEOUT_MS=20000
+MAX_IMAGE_BYTES=10485760
+DEBUG_ERRORS=false
 ```
 
 ## Google Credentials
@@ -92,6 +96,18 @@ Server starts on `http://localhost:3000` by default.
 - `POST /v1/chat/completions`
 - `POST /v1/images/generations`
 
+### OpenAI / OpenRouter Compatibility Notes
+
+- Router2 accepts OpenAI-compatible request payloads for:
+  - `chat/completions` (`messages`, optional `model`, multimodal `content[]`)
+  - `images/generations` (`prompt`, `n`, optional `model`)
+- Router2 returns OpenAI-compatible success response shapes:
+  - chat: `choices[].message.role/content`
+  - images: `created`, `data[].b64_json`
+- Router2 also adds a diagnostic response header:
+  - `x-router2-route: gemini-chat | gemini-image | imagen`
+- Error objects are simplified (`{ "error": "..." }`), not full OpenAI error object schema.
+
 ### Headers
 
 - `Authorization: Bearer <ROUTER_API_KEY>`
@@ -104,7 +120,7 @@ curl -X POST "http://localhost:3000/v1/chat/completions" \
   -H "Authorization: Bearer supersecretkey" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.0-flash-001",
+    "model": "gemini-2.5-flash",
     "messages": [
       { "role": "user", "content": "Explain AI" }
     ]
@@ -118,7 +134,7 @@ curl -X POST "http://localhost:3000/v1/chat/completions" \
   -H "Authorization: Bearer supersecretkey" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.0-flash-001",
+    "model": "gemini-2.5-flash",
     "messages": [
       {
         "role": "user",
@@ -138,7 +154,7 @@ curl -X POST "http://localhost:3000/v1/images/generations" \
   -H "Authorization: Bearer supersecretkey" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.0-flash-preview-image-generation",
+    "model": "gemini-2.5-flash",
     "prompt": "A futuristic city at sunset, cinematic, ultra detailed",
     "n": 1
   }'
@@ -191,7 +207,9 @@ For image generation, response format is OpenAI-compatible:
 
 - `401` for missing/invalid API key
 - `400` for malformed request body
-- `500` for Vertex API failures
+- `429` when Vertex is rate-limited/resource exhausted
+- `503` for transient Vertex unavailability
+- `500` for unexpected server/internal errors
 - If `STRICT_IMAGE_MODE=true`, vision requests fail fast when image fetch fails
 - If `STRICT_IMAGE_MODE=false`, image fetch failures fall back to text-only behavior
 
@@ -224,3 +242,45 @@ Render injects `PORT`, and this app listens on `process.env.PORT`, so it is comp
 ## Cloud Run (Next Step)
 
 This codebase is also compatible with Cloud Run because it is stateless and binds to `process.env.PORT`.
+
+## Migrate from Google AI Studio API to Router2
+
+If your app currently calls Google AI Studio Gemini endpoints directly, migration is mainly a transport/auth change.
+
+### 1) Endpoint and auth change
+
+- Before (AI Studio): Google endpoint + Google API key auth.
+- After (Router2): your Router2 endpoint + Router API key auth.
+
+Use:
+
+- Base URL: `https://your-router-domain`
+- Header: `Authorization: Bearer <ROUTER_API_KEY>`
+
+### 2) Keep OpenAI-style payloads in your app
+
+Router2 accepts OpenAI-style payloads, so clients that already talk OpenAI/OpenRouter-style APIs usually only need:
+
+- `baseURL` swap to Router2
+- API key swap to `ROUTER_API_KEY`
+- optional model name updates (for example `gemini-2.5-flash`, `imagen-3.0-generate-002`)
+
+### 3) Model mapping guidance
+
+- Text + vision chat:
+  - Set `GEMINI_FLASH_MODEL=gemini-2.5-flash` in env
+  - Or pass `"model": "gemini-2.5-flash"` per request
+- Image generation:
+  - Imagen: `"model": "imagen-3.0-generate-002"`
+  - Gemini image-capable model: set/request a Gemini image-capable model
+
+### 4) Client migration checklist
+
+- Replace old endpoint with `https://your-router-domain/v1/chat/completions`
+- Replace old endpoint with `https://your-router-domain/v1/images/generations`
+- Replace Google API key header with `Authorization: Bearer <ROUTER_API_KEY>`
+- Keep request JSON as OpenAI-style
+- Validate returned `choices` and `data[].b64_json`
+- In production, set:
+  - `STRICT_IMAGE_MODE=true`
+  - `DEBUG_ERRORS=false`
