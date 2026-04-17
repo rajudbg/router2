@@ -30,6 +30,63 @@ function classifyImageRoute(model) {
   return model.toLowerCase().startsWith("imagen") ? "imagen" : "gemini-image";
 }
 
+function writeSseData(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function streamOpenAIChatResponse(res, { content, model }) {
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const modelName = model || process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
+
+  writeSseData(res, {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model: modelName,
+    choices: [
+      {
+        index: 0,
+        delta: { role: "assistant" },
+        finish_reason: null
+      }
+    ]
+  });
+
+  if (content) {
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: { content },
+          finish_reason: null
+        }
+      ]
+    });
+  }
+
+  writeSseData(res, {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model: modelName,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: "stop"
+      }
+    ]
+  });
+
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
@@ -55,6 +112,19 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
       vertexPayload.model
     );
     res.set("x-router2-route", "gemini-chat");
+
+    if (req.body?.stream === true) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+      streamOpenAIChatResponse(res, {
+        content,
+        model: vertexPayload.model
+      });
+      return;
+    }
+
     return res.json(toOpenAIResponse(content));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
