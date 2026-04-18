@@ -206,14 +206,27 @@ function truncateForLog(obj, maxLength = 1000) {
   return str.substring(0, maxLength) + "...[truncated]";
 }
 
-function extractBotToolCalls(text) {
+function extractTextToolCalls(text) {
   if (!text || typeof text !== "string") return null;
-  if (!text.includes("<bot_tool_call>")) return null;
+
+  const hasToolCall = text.includes("<tool_call>");
+  const hasBotToolCall = text.includes("<bot_tool_call>");
+
+  if (!hasToolCall && !hasBotToolCall) return null;
 
   const toolCalls = [];
-  const regex = /<bot_tool_call>([\s\S]*?)<\/bot_tool_call>/g;
-  let match;
+  let format = null;
+  let regex;
 
+  if (hasToolCall) {
+    format = "tool_call";
+    regex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+  } else {
+    format = "bot_tool_call";
+    regex = /<bot_tool_call>([\s\S]*?)<\/bot_tool_call>/g;
+  }
+
+  let match;
   while ((match = regex.exec(text)) !== null) {
     try {
       const jsonContent = match[1].trim();
@@ -226,11 +239,11 @@ function extractBotToolCalls(text) {
         });
       }
     } catch (e) {
-      logStructured("WARN", "ToolCall", "Failed to parse bot_tool_call JSON", { error: e?.message, content: match[1]?.substring(0, 200) });
+      logStructured("WARN", "ToolCall", `Failed to parse ${format} JSON`, { error: e?.message, content: match[1]?.substring(0, 200) });
     }
   }
 
-  return toolCalls.length > 0 ? toolCalls : null;
+  return toolCalls.length > 0 ? { toolCalls, format } : null;
 }
 
 function extractFunctionCalls(response) {
@@ -431,10 +444,10 @@ export async function generateTextFromVertex(contents, model) {
 
   const text = extractResponseText(response);
 
-  const botToolCalls = extractBotToolCalls(text);
-  if (botToolCalls) {
-    logStructured("INFO", "ToolCall Parsed", `from bot_tool_call format`, { model: actualModel, count: botToolCalls.length, names: botToolCalls.map(tc => tc.name) });
-    return { type: "functionCalls", functionCalls: botToolCalls, model: actualModel, fallbackUsed };
+  const textToolCalls = extractTextToolCalls(text);
+  if (textToolCalls) {
+    logStructured("INFO", "ToolCall Parsed", `format: ${textToolCalls.format}`, { model: actualModel, count: textToolCalls.toolCalls.length, names: textToolCalls.toolCalls.map(tc => tc.name), format: textToolCalls.format });
+    return { type: "functionCalls", functionCalls: textToolCalls.toolCalls, model: actualModel, fallbackUsed };
   }
 
   logStructured("INFO", "Vertex", "Text response", { model: actualModel, requestedModel: resolvedModel, fallbackUsed, textLength: text.length, isFallback: text === SAFE_FALLBACK_TEXT });
