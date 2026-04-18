@@ -211,37 +211,91 @@ function extractTextToolCalls(text) {
 
   const hasToolCall = text.includes("<tool_call>");
   const hasBotToolCall = text.includes("<bot_tool_call>");
+  const hasCallFormat = text.includes("call:") || text.match(/call\s*\{/);
 
-  if (!hasToolCall && !hasBotToolCall) return null;
+  if (!hasToolCall && !hasBotToolCall && !hasCallFormat) return null;
 
   const toolCalls = [];
   let format = null;
-  let regex;
 
-  if (hasToolCall) {
-    format = "tool_call";
-    regex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
-  } else {
-    format = "bot_tool_call";
-    regex = /<bot_tool_call>([\s\S]*?)<\/bot_tool_call>/g;
+  // Format 1: <tool_call> or <bot_tool_call> tags
+  if (hasToolCall || hasBotToolCall) {
+    format = hasToolCall ? "tool_call" : "bot_tool_call";
+    const regex = hasToolCall
+      ? /<tool_call>([\s\S]*?)<\/tool_call>/g
+      : /<bot_tool_call>([\s\S]*?)<\/bot_tool_call>/g;
+
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      try {
+        const jsonContent = match[1].trim();
+        const parsed = JSON.parse(jsonContent);
+
+        if (parsed.name) {
+          toolCalls.push({
+            name: parsed.name,
+            args: parsed.arguments || parsed.args || {}
+          });
+        } else {
+          logStructured("WARN", "ToolCall", "Parsed tool call missing required 'name' field", { parsed: truncateForLog(parsed, 500) });
+        }
+      } catch (e) {
+        logStructured("WARN", "ToolCall", `Failed to parse ${format} JSON`, { error: e?.message, content: match[1]?.substring(0, 200) });
+      }
+    }
   }
 
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    try {
-      const jsonContent = match[1].trim();
-      const parsed = JSON.parse(jsonContent);
+  // Format 2: call:name{args} format (e.g., "call:read{path:\"/app/SKILL.md\"}")
+  if (toolCalls.length === 0 && hasCallFormat) {
+    const callRegex = /call:(\w+)\s*\{([^}]*)\}/g;
+    let match;
+    while ((match = callRegex.exec(text)) !== null) {
+      try {
+        const name = match[1];
+        const argsStr = match[2];
 
-      if (parsed.name) {
-        toolCalls.push({
-          name: parsed.name,
-          args: parsed.arguments || parsed.args || {}
-        });
-      } else {
-        logStructured("WARN", "ToolCall", "Parsed tool call missing required 'name' field", { parsed: truncateForLog(parsed, 500) });
+        // Parse simple key:value pairs
+        const args = {};
+        const pairs = argsStr.match(/(\w+):\s*([^,]+)/g);
+        if (pairs) {
+          for (const pair of pairs) {
+            const [key, val] = pair.split(/:\s*/);
+            // Remove quotes if present
+            args[key] = val.replace(/^["']|["']$/g, "");
+          }
+        }
+
+        toolCalls.push({ name, args });
+        format = "call:name{}";
+      } catch (e) {
+        logStructured("WARN", "ToolCall", "Failed to parse call:name{} format", { error: e?.message, match: match[0]?.substring(0, 100) });
       }
-    } catch (e) {
-      logStructured("WARN", "ToolCall", `Failed to parse ${format} JSON`, { error: e?.message, content: match[1]?.substring(0, 200) });
+    }
+
+    // Format 3: call{name, args} or call{name:..., args:...} JSON-like format
+    if (toolCalls.length === 0) {
+      const callJsonRegex = /call\s*\{(\s*["']?name["']?\s*[:=]\s*["']?([^"'\s,}]+)["']?[^}]*)\}/g;
+      let jsonMatch;
+      while ((jsonMatch = callJsonRegex.exec(text)) !== null) {
+        try {
+          const jsonStr = "{" + jsonMatch[1] + "}";
+          // Normalize to valid JSON
+          const normalized = jsonStr
+            .replace(/(\w+):/g, '"$1":')
+            .replace(/'/g, '"');
+          const parsed = JSON.parse(normalized);
+
+          if (parsed.name) {
+            toolCalls.push({
+              name: parsed.name,
+              args: parsed.arguments || parsed.args || {}
+            });
+            format = "call{}";
+          }
+        } catch (e) {
+          logStructured("WARN", "ToolCall", "Failed to parse call{} JSON format", { error: e?.message, match: jsonMatch[0]?.substring(0, 100) });
+        }
+      }
     }
   }
 
@@ -355,9 +409,26 @@ async function attemptSingleRequest(contents, model, attemptNum) {
 
   const finishReason = getFinishReason(response);
   const finishMessage = getFinishMessage(response);
-  if (isRetryableFinishReason(finishReason)) {
+
+  // Try to parse malformed function call from finishMessage
+  if (finishReason === "MALFORMED_FUNCTION_CALL" && finishMessage) {
+    const extractedCalls = extractTextToolCalls(finishMessage);
+    if (extractedCalls && extractedCalls.toolCalls.length > 0) {
+      logStructured("INFO", "ToolCall", `Parsed from MALFORMED_FUNCTION_CALL message using ${extractedCalls.format}`, { model, count: extractedCalls.toolCalls.length, names: extractedCalls.toolCalls.map(tc => tc.name) });
+      // Return response with injected tool calls for later processing
+      return { response: { ...response, _extractedToolCalls: extractedCalls.toolCalls }, model, latencyMs };
+    }
+
+    // Failed to parse - treat as retryable
     const retryableError = new Error(`Retryable finish reason: ${finishReason}. ${finishMessage}`);
     retryableError.code = "MALFORMED_FUNCTION_CALL";
+    logStructured("WARN", "Retry", `Retryable finish reason: ${finishReason} (parsing failed)`, { attempt: attemptNum, model, finishReason, finishMessage });
+    throw { error: retryableError, isRetryable: true, model, attempt: attemptNum };
+  }
+
+  if (isRetryableFinishReason(finishReason)) {
+    const retryableError = new Error(`Retryable finish reason: ${finishReason}. ${finishMessage}`);
+    retryableError.code = finishReason;
     logStructured("WARN", "Retry", `Retryable finish reason: ${finishReason}`, { attempt: attemptNum, model, finishReason, finishMessage });
     throw { error: retryableError, isRetryable: true, model, attempt: attemptNum };
   }
@@ -436,6 +507,12 @@ export async function generateTextFromVertex(contents, model) {
   if (isErrorFinishReason(finishReason)) {
     logStructured("ERROR", "Vertex", `Error finish reason: ${finishReason}`, { model: actualModel, requestedModel: resolvedModel, finishReason, finishMessage, fallbackUsed });
     return { type: "text", text: `Model error: ${finishReason}. ${finishMessage || ERROR_FALLBACK_TEXT}`, isError: true, model: actualModel, fallbackUsed };
+  }
+
+  // Check for tool calls extracted from MALFORMED_FUNCTION_CALL
+  if (response?._extractedToolCalls && response._extractedToolCalls.length > 0) {
+    logStructured("INFO", "Tool Calls Extracted", `Using ${response._extractedToolCalls.length} tool call(s) from MALFORMED_FUNCTION_CALL parsing`, { model: actualModel, requestedModel: resolvedModel, names: response._extractedToolCalls.map(fc => fc.name), count: response._extractedToolCalls.length });
+    return { type: "functionCalls", functionCalls: response._extractedToolCalls, model: actualModel, fallbackUsed };
   }
 
   const functionCalls = extractFunctionCalls(response);
