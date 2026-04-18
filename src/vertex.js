@@ -139,9 +139,12 @@ function getFinishMessage(response) {
   return firstCandidate?.finishMessage || "";
 }
 
+function isRetryableFinishReason(finishReason) {
+  return finishReason === "MALFORMED_FUNCTION_CALL";
+}
+
 function isErrorFinishReason(finishReason) {
   const errorReasons = [
-    "MALFORMED_FUNCTION_CALL",
     "RECITATION",
     "SAFETY",
     "OTHER"
@@ -306,6 +309,15 @@ async function attemptSingleRequest(contents, model, attemptNum) {
     const isRetryable = isRetryableError(error);
     logStructured("WARN", "Retry", "Request failed", { attempt: attemptNum, model, error: error?.message, code: error?.code, retryable: isRetryable });
     throw { error, isRetryable, model, attempt: attemptNum };
+  }
+
+  const finishReason = getFinishReason(response);
+  const finishMessage = getFinishMessage(response);
+  if (isRetryableFinishReason(finishReason)) {
+    const retryableError = new Error(`Retryable finish reason: ${finishReason}. ${finishMessage}`);
+    retryableError.code = "MALFORMED_FUNCTION_CALL";
+    logStructured("WARN", "Retry", `Retryable finish reason: ${finishReason}`, { attempt: attemptNum, model, finishReason, finishMessage });
+    throw { error: retryableError, isRetryable: true, model, attempt: attemptNum };
   }
 
   return { response, model, latencyMs };
