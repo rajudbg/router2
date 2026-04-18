@@ -206,6 +206,33 @@ function truncateForLog(obj, maxLength = 1000) {
   return str.substring(0, maxLength) + "...[truncated]";
 }
 
+function extractBotToolCalls(text) {
+  if (!text || typeof text !== "string") return null;
+  if (!text.includes("<bot_tool_call>")) return null;
+
+  const toolCalls = [];
+  const regex = /<bot_tool_call>([\s\S]*?)<\/bot_tool_call>/g;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const jsonContent = match[1].trim();
+      const parsed = JSON.parse(jsonContent);
+
+      if (parsed.name) {
+        toolCalls.push({
+          name: parsed.name,
+          args: parsed.arguments || parsed.args || {}
+        });
+      }
+    } catch (e) {
+      logStructured("WARN", "ToolCall", "Failed to parse bot_tool_call JSON", { error: e?.message, content: match[1]?.substring(0, 200) });
+    }
+  }
+
+  return toolCalls.length > 0 ? toolCalls : null;
+}
+
 function extractFunctionCalls(response) {
   const candidates = response?.candidates ?? [];
   const firstCandidate = candidates[0];
@@ -403,6 +430,13 @@ export async function generateTextFromVertex(contents, model) {
   }
 
   const text = extractResponseText(response);
+
+  const botToolCalls = extractBotToolCalls(text);
+  if (botToolCalls) {
+    logStructured("INFO", "ToolCall Parsed", `from bot_tool_call format`, { model: actualModel, count: botToolCalls.length, names: botToolCalls.map(tc => tc.name) });
+    return { type: "functionCalls", functionCalls: botToolCalls, model: actualModel, fallbackUsed };
+  }
+
   logStructured("INFO", "Vertex", "Text response", { model: actualModel, requestedModel: resolvedModel, fallbackUsed, textLength: text.length, isFallback: text === SAFE_FALLBACK_TEXT });
   return { type: "text", text, model: actualModel, fallbackUsed };
 }
