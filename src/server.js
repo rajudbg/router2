@@ -6,6 +6,7 @@ import {
   toOpenAIImagesRequest,
   toOpenAIImagesResponse,
   toOpenAIResponse,
+  toOpenAIToolCallsResponse,
   toVertexRequest
 } from "./transform.js";
 import {
@@ -39,21 +40,7 @@ function streamOpenAIChatResponse(res, { content, model }) {
   const created = Math.floor(Date.now() / 1000);
   const modelName = model || process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
 
-  writeSseData(res, {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model: modelName,
-    choices: [
-      {
-        index: 0,
-        delta: { role: "assistant" },
-        finish_reason: null
-      }
-    ]
-  });
-
-  if (content) {
+  try {
     writeSseData(res, {
       id,
       object: "chat.completion.chunk",
@@ -62,29 +49,141 @@ function streamOpenAIChatResponse(res, { content, model }) {
       choices: [
         {
           index: 0,
-          delta: { content },
+          delta: { role: "assistant" },
           finish_reason: null
         }
       ]
     });
+
+    const safeContent = content || "No response generated";
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: { content: safeContent },
+          finish_reason: null
+        }
+      ]
+    });
+
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "stop"
+        }
+      ]
+    });
+  } catch (streamError) {
+    console.error("[Router2][Streaming] Error in text stream:", streamError);
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: { content: "Stream interrupted" },
+          finish_reason: "stop"
+        }
+      ]
+    });
+  } finally {
+    res.write("data: [DONE]\n\n");
+    res.end();
   }
+}
 
-  writeSseData(res, {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model: modelName,
-    choices: [
-      {
-        index: 0,
-        delta: {},
-        finish_reason: "stop"
-      }
-    ]
-  });
+function streamOpenAIToolCallsResponse(res, { functionCalls, model }) {
+  const id = `chatcmpl-${Date.now()}`;
+  const created = Math.floor(Date.now() / 1000);
+  const modelName = model || process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
 
-  res.write("data: [DONE]\n\n");
-  res.end();
+  const toolCalls = functionCalls.map((fc, index) => ({
+    index,
+    id: `call_${Math.random().toString(36).substring(2, 15)}${Math.random().toString(36).substring(2, 15)}`,
+    type: "function",
+    function: {
+      name: fc.name,
+      arguments: JSON.stringify(fc.args)
+    }
+  }));
+
+  try {
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant" },
+          finish_reason: null
+        }
+      ]
+    });
+
+    for (const toolCall of toolCalls) {
+      writeSseData(res, {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model: modelName,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [toolCall]
+            },
+            finish_reason: null
+          }
+        ]
+      });
+    }
+
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "tool_calls"
+        }
+      ]
+    });
+  } catch (streamError) {
+    console.error("[Router2][Streaming] Error in tool_calls stream:", streamError);
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: "tool_calls"
+        }
+      ]
+    });
+  } finally {
+    res.write("data: [DONE]\n\n");
+    res.end();
+  }
 }
 
 app.get("/health", (req, res) => {
@@ -107,11 +206,41 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
     }
 
     const vertexPayload = await toVertexRequest(req.body);
-    const content = await generateTextFromVertex(
+    const result = await generateTextFromVertex(
       vertexPayload.contents,
       vertexPayload.model
     );
     res.set("x-router2-route", "gemini-chat");
+
+    if (result.type === "functionCalls") {
+      console.log("[Router2][Route] Sending tool_calls response", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, count: result.functionCalls.length });
+      if (req.body?.stream === true) {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.flushHeaders?.();
+        streamOpenAIToolCallsResponse(res, {
+          functionCalls: result.functionCalls,
+          model: result.model || vertexPayload.model
+        });
+        return;
+      }
+      const response = toOpenAIToolCallsResponse(result.functionCalls);
+      const isError = response.isError;
+      delete response.isError;
+      if (isError) {
+        console.error("[Router2][ERROR][Final Response] Tool calls validation failed", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, finish_reason: response.choices[0]?.finish_reason });
+      } else {
+        console.log("[Router2][Final Response] Non-streaming tool_calls validated", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, finish_reason: response.choices[0]?.finish_reason, toolCount: response.choices[0]?.message?.tool_calls?.length });
+      }
+      return res.json(response);
+    }
+
+    if (result.isError) {
+      console.error("[Router2][ERROR][Route] Sending error fallback response", { model: result.model, requestedModel: vertexPayload.model, reason: "Vertex request failed or timeout" });
+    } else {
+      console.log("[Router2][Route] Sending text response", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, textLength: result.text?.length });
+    }
 
     if (req.body?.stream === true) {
       res.setHeader("Content-Type", "text/event-stream");
@@ -119,13 +248,21 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders?.();
       streamOpenAIChatResponse(res, {
-        content,
-        model: vertexPayload.model
+        content: result.text,
+        model: result.model || vertexPayload.model
       });
       return;
     }
 
-    return res.json(toOpenAIResponse(content));
+    const response = toOpenAIResponse(result.text);
+    const isError = response.isError;
+    delete response.isError;
+    if (isError) {
+      console.error("[Router2][ERROR][Final Response] Text response validation failed", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, finish_reason: response.choices[0]?.finish_reason });
+    } else {
+      console.log("[Router2][Final Response] Non-streaming text validated", { model: result.model, requestedModel: vertexPayload.model, fallbackUsed: result.fallbackUsed, hasContent: !!response.choices[0]?.message?.content, contentLength: response.choices[0]?.message?.content?.length });
+    }
+    return res.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("Vertex chat error:", error);

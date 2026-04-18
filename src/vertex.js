@@ -1,9 +1,19 @@
 import { helpers, v1 } from "@google-cloud/aiplatform";
 
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 15_000;
 const RETRYABLE_ERROR_CODES = new Set([4, 8, 13, 14]);
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 500;
+const SAFE_FALLBACK_TEXT = "No response generated";
+const ERROR_FALLBACK_TEXT = "Model temporarily unavailable, please retry";
+const ENABLE_SMART_ROUTING = String(process.env.ENABLE_SMART_ROUTING || "true").toLowerCase() === "true";
+const SMART_ROUTING_FALLBACK_DELAY_MS = 500;
+
+const MODEL_FALLBACK_CHAINS = {
+  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview"],
+  "gemini-3.1-flash-preview": ["gemini-3.1-flash-preview", "gemini-3.1-pro-preview"],
+  "gemini-3.1-flash-lite-preview": ["gemini-3.1-flash-lite-preview", "gemini-3.1-flash-preview"]
+};
 
 const { PredictionServiceClient } = v1;
 
@@ -128,7 +138,57 @@ function extractResponseText(response) {
     .filter((value) => typeof value === "string")
     .join("");
 
-  return text || "";
+  return text || SAFE_FALLBACK_TEXT;
+}
+
+function logStructured(level, component, message, data) {
+  const timestamp = new Date().toISOString();
+  const logLine = `[Router2][${timestamp}][${level}][${component}] ${message}${data ? " " + JSON.stringify(data) : ""}`;
+  console.log(logLine);
+}
+
+function getFallbackChain(model) {
+  const normalizedModel = model?.toLowerCase().trim() || "";
+  for (const [key, chain] of Object.entries(MODEL_FALLBACK_CHAINS)) {
+    if (normalizedModel.includes(key.toLowerCase())) {
+      return chain;
+    }
+  }
+  return [model];
+}
+
+function isRetryableError(error) {
+  const code = error?.code;
+  const statusCode = error?.statusCode;
+
+  if (error.name === "AbortError") return true;
+  if (code === 4 || code === 8 || code === 13 || code === 14) return true;
+  if (statusCode === 503 || statusCode === 429) return true;
+
+  return false;
+}
+
+function truncateForLog(obj, maxLength = 1000) {
+  const str = JSON.stringify(obj);
+  if (str.length <= maxLength) return obj;
+  return str.substring(0, maxLength) + "...[truncated]";
+}
+
+function extractFunctionCalls(response) {
+  const candidates = response?.candidates ?? [];
+  const firstCandidate = candidates[0];
+  const parts = firstCandidate?.content?.parts ?? [];
+
+  const functionCalls = [];
+  for (const part of parts) {
+    if (part?.functionCall?.name) {
+      functionCalls.push({
+        name: part.functionCall.name,
+        args: part.functionCall.args || {}
+      });
+    }
+  }
+  return functionCalls;
 }
 
 export async function generateFromVertex(contents) {
@@ -185,20 +245,115 @@ export function modelSupportsImageGeneration(model) {
   return isImagenModel(model) || isGeminiFamilyModel(model);
 }
 
-export async function generateTextFromVertex(contents, model) {
+async function attemptSingleRequest(contents, model, attemptNum) {
   const client = createClient();
   const request = {
     model: getModelPath(model),
     contents
   };
 
-  const [response] = await withRetry(() =>
-    client.generateContent(request, {
-      timeout: REQUEST_TIMEOUT_MS
-    })
-  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  return extractResponseText(response);
+  const startTime = Date.now();
+  let response;
+  let error;
+
+  try {
+    [response] = await client.generateContent(request, {
+      timeout: REQUEST_TIMEOUT_MS,
+      abortSignal: controller.signal
+    });
+  } catch (err) {
+    error = err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const latencyMs = Date.now() - startTime;
+  logStructured("INFO", "Latency", "Request latency", { model, ms: latencyMs, attempt: attemptNum, success: !error });
+
+  if (error) {
+    const isRetryable = isRetryableError(error);
+    logStructured("WARN", "Retry", "Request failed", { attempt: attemptNum, model, error: error?.message, code: error?.code, retryable: isRetryable });
+    throw { error, isRetryable, model, attempt: attemptNum };
+  }
+
+  return { response, model, latencyMs };
+}
+
+async function attemptWithRetryAndFallback(contents, primaryModel) {
+  const fallbackChain = ENABLE_SMART_ROUTING ? getFallbackChain(primaryModel) : [primaryModel];
+
+  logStructured("INFO", "SmartRouting", "Starting request with same-location fallback chain", { primary: primaryModel, chain: fallbackChain, enabled: ENABLE_SMART_ROUTING, location: "global" });
+
+  for (let chainIndex = 0; chainIndex < fallbackChain.length; chainIndex++) {
+    const currentModel = fallbackChain[chainIndex];
+
+    if (chainIndex > 0) {
+      logStructured("INFO", "Fallback", "Switching to same-location fallback model", { from: fallbackChain[chainIndex - 1], to: currentModel, fallbackNum: chainIndex, location: "global" });
+    }
+
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await attemptSingleRequest(contents, currentModel, attempt);
+        logStructured("INFO", "SmartRouting", "Request successful", { model: currentModel, attempts: attempt, fallbackUsed: chainIndex > 0 });
+        return result;
+      } catch (attemptError) {
+        const { error, isRetryable, model, attempt: attemptNum } = attemptError;
+
+        if (!isRetryable) {
+          logStructured("ERROR", "SmartRouting", "Non-retryable error", { model, error: error?.message, code: error?.code });
+          throw error;
+        }
+
+        if (attempt < maxAttempts) {
+          const delayMs = attempt * SMART_ROUTING_FALLBACK_DELAY_MS;
+          logStructured("INFO", "Retry", `Waiting ${delayMs}ms before same-model retry`, { model, attempt: attemptNum, nextAttempt: attempt + 1 });
+          await sleep(delayMs);
+        } else {
+          logStructured("WARN", "Retry", "Max retries exceeded for model", { model, attempts: attempt });
+        }
+      }
+    }
+  }
+
+  logStructured("ERROR", "SmartRouting", "All same-location fallback models exhausted", { primary: primaryModel, chain: fallbackChain, location: "global" });
+  throw new Error("All models unavailable after retries and fallbacks");
+}
+
+export async function generateTextFromVertex(contents, model) {
+  const resolvedModel = model || process.env.GEMINI_FLASH_MODEL || "gemini-2.0-flash-001";
+  logStructured("INFO", "Vertex", "Request start", { model: resolvedModel, contentCount: contents.length, smartRouting: ENABLE_SMART_ROUTING });
+
+  let result;
+  try {
+    result = await attemptWithRetryAndFallback(contents, resolvedModel);
+  } catch (error) {
+    const isTimeout = error.name === "AbortError" || error?.code === 4;
+    if (isTimeout) {
+      logStructured("ERROR", "Vertex", "Request timeout/aborted after all retries", { model: resolvedModel, error: error?.message });
+    } else {
+      logStructured("ERROR", "Vertex", "Request failed after all retries/fallbacks", { model: resolvedModel, error: error?.message, code: error?.code });
+    }
+    return { type: "text", text: ERROR_FALLBACK_TEXT, isError: true, model: resolvedModel };
+  }
+
+  const { response, model: actualModel, latencyMs } = result;
+  const fallbackUsed = actualModel !== resolvedModel;
+
+  logStructured("DEBUG", "Gemini Raw", "Response received", { model: actualModel, requestedModel: resolvedModel, fallbackUsed, latencyMs, raw: truncateForLog(response) });
+
+  const functionCalls = extractFunctionCalls(response);
+  if (functionCalls.length > 0) {
+    logStructured("INFO", "Tool Calls Extracted", `Found ${functionCalls.length} function call(s)`, { model: actualModel, requestedModel: resolvedModel, names: functionCalls.map(fc => fc.name), count: functionCalls.length });
+    return { type: "functionCalls", functionCalls, model: actualModel, fallbackUsed };
+  }
+
+  const text = extractResponseText(response);
+  logStructured("INFO", "Vertex", "Text response", { model: actualModel, requestedModel: resolvedModel, fallbackUsed, textLength: text.length, isFallback: text === SAFE_FALLBACK_TEXT });
+  return { type: "text", text, model: actualModel, fallbackUsed };
 }
 
 async function generateWithGeminiImage(client, prompt, n, model) {
