@@ -7,6 +7,45 @@ const BASE_BACKOFF_MS = 500;
 
 const { PredictionServiceClient } = v1;
 
+function getGcpLocation() {
+  const raw = process.env.GOOGLE_CLOUD_LOCATION || process.env.LOCATION;
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+/**
+ * Vertex Prediction API host. For location "global" this must be
+ * aiplatform.googleapis.com — not global-aiplatform.googleapis.com.
+ */
+function getVertexApiHostname() {
+  const raw = process.env.VERTEX_API_ENDPOINT?.trim();
+  if (raw) {
+    try {
+      const withProto = raw.includes("://") ? raw : `https://${raw}`;
+      const { hostname } = new URL(withProto);
+      if (!hostname) {
+        throw new Error("VERTEX_API_ENDPOINT must include a hostname");
+      }
+      return hostname;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid VERTEX_API_ENDPOINT: ${detail}`);
+    }
+  }
+
+  const location = getGcpLocation();
+  if (!location) {
+    throw new Error(
+      "Missing GOOGLE_CLOUD_LOCATION or LOCATION environment variable"
+    );
+  }
+
+  if (location === "global") {
+    return "aiplatform.googleapis.com";
+  }
+
+  return `${location}-aiplatform.googleapis.com`;
+}
+
 export class VertexRequestError extends Error {
   constructor(message, statusCode, providerCode) {
     super(message);
@@ -18,11 +57,13 @@ export class VertexRequestError extends Error {
 
 function getModelPath(model) {
   const projectId = process.env.PROJECT_ID;
-  const location = process.env.LOCATION;
+  const location = getGcpLocation();
   const defaultModel = process.env.GEMINI_FLASH_MODEL || "gemini-2.0-flash-001";
 
   if (!projectId || !location) {
-    throw new Error("Missing PROJECT_ID or LOCATION environment variables");
+    throw new Error(
+      "Missing PROJECT_ID or GOOGLE_CLOUD_LOCATION/LOCATION environment variables"
+    );
   }
 
   const chosenModel = model || defaultModel;
@@ -30,13 +71,8 @@ function getModelPath(model) {
 }
 
 function createClient() {
-  const location = process.env.LOCATION;
-  if (!location) {
-    throw new Error("Missing LOCATION environment variable");
-  }
-
   return new PredictionServiceClient({
-    apiEndpoint: `${location}-aiplatform.googleapis.com`
+    apiEndpoint: getVertexApiHostname()
   });
 }
 
@@ -193,7 +229,7 @@ async function generateWithGeminiImage(client, prompt, n, model) {
 
 async function generateWithImagen(client, prompt, n, model) {
   const projectId = process.env.PROJECT_ID;
-  const location = process.env.LOCATION;
+  const location = getGcpLocation();
   const imagenModel = model || process.env.IMAGEN_MODEL || "imagen-3.0-generate-002";
 
   const endpoint = `projects/${projectId}/locations/${location}/publishers/google/models/${imagenModel}`;
