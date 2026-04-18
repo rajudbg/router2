@@ -10,9 +10,8 @@ const ENABLE_SMART_ROUTING = String(process.env.ENABLE_SMART_ROUTING || "true").
 const SMART_ROUTING_FALLBACK_DELAY_MS = 500;
 
 const MODEL_FALLBACK_CHAINS = {
-  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.1-flash-preview", "gemini-2.0-flash-001"],
-  "gemini-3.1-flash-preview": ["gemini-3.1-flash-preview", "gemini-3.1-pro-preview", "gemini-2.0-flash-001"],
-  "gemini-3.1-flash-lite-preview": ["gemini-3.1-flash-lite-preview", "gemini-3.1-flash-preview", "gemini-2.0-flash-001"]
+  "gemini-3.0-flash-preview": ["gemini-3.0-flash-preview", "gemini-3.1-pro-preview"],
+  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.0-flash-preview"]
 };
 
 const { PredictionServiceClient } = v1;
@@ -168,16 +167,6 @@ function isRetryableError(error) {
   return false;
 }
 
-function isModelNotFoundError(error) {
-  const code = error?.code;
-  const message = error?.message || "";
-
-  if (code === 5) return true;
-  if (message.includes("NOT_FOUND")) return true;
-  if (message.includes("was not found")) return true;
-
-  return false;
-}
 
 function truncateForLog(obj, maxLength = 1000) {
   const str = JSON.stringify(obj);
@@ -302,7 +291,9 @@ async function attemptWithRetryAndFallback(contents, primaryModel) {
     const currentModel = fallbackChain[chainIndex];
 
     if (chainIndex > 0) {
-      logStructured("INFO", "Fallback", "Switching to same-location fallback model", { from: fallbackChain[chainIndex - 1], to: currentModel, fallbackNum: chainIndex, location: "global" });
+      const fromShort = fallbackChain[chainIndex - 1].replace("gemini-3.0-", "").replace("gemini-3.1-", "").replace("-preview", "");
+      const toShort = currentModel.replace("gemini-3.0-", "").replace("gemini-3.1-", "").replace("-preview", "");
+      logStructured("INFO", "Fallback", `from ${fromShort} → ${toShort}`, { from: fallbackChain[chainIndex - 1], to: currentModel, fallbackNum: chainIndex, location: "global" });
     }
 
     const maxAttempts = 2;
@@ -313,12 +304,6 @@ async function attemptWithRetryAndFallback(contents, primaryModel) {
         return result;
       } catch (attemptError) {
         const { error, isRetryable, model, attempt: attemptNum } = attemptError;
-
-        const notFound = isModelNotFoundError(error);
-        if (notFound) {
-          logStructured("WARN", "SmartRouting", "Model not found, skipping to next fallback", { model, error: error?.message, code: error?.code });
-          break;
-        }
 
         if (!isRetryable) {
           logStructured("ERROR", "SmartRouting", "Non-retryable error", { model, error: error?.message, code: error?.code });
