@@ -237,6 +237,8 @@ function extractTextToolCalls(text) {
           name: parsed.name,
           args: parsed.arguments || parsed.args || {}
         });
+      } else {
+        logStructured("WARN", "ToolCall", "Parsed tool call missing required 'name' field", { parsed: truncateForLog(parsed, 500) });
       }
     } catch (e) {
       logStructured("WARN", "ToolCall", `Failed to parse ${format} JSON`, { error: e?.message, content: match[1]?.substring(0, 200) });
