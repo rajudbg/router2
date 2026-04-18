@@ -447,7 +447,7 @@ export async function generateTextFromVertex(contents, model) {
   const text = extractResponseText(response);
 
   const textToolCalls = extractTextToolCalls(text);
-  if (textToolCalls) {
+  if (textToolCalls && textToolCalls.toolCalls.length > 0) {
     logStructured("INFO", "ToolCall Parsed", `format: ${textToolCalls.format}`, { model: actualModel, count: textToolCalls.toolCalls.length, names: textToolCalls.toolCalls.map(tc => tc.name), format: textToolCalls.format });
     return { type: "functionCalls", functionCalls: textToolCalls.toolCalls, model: actualModel, fallbackUsed };
   }
