@@ -212,9 +212,10 @@ function extractTextToolCalls(text) {
   const hasToolCall = text.includes("<tool_call>");
   const hasBotToolCall = text.includes("<bot_tool_call>");
   const hasFcTag = text.includes("<fc>");
+  const hasFunctionCallTag = text.includes("<function_call>");
   const hasCallFormat = text.includes("call:") || text.match(/call\s*\{/);
 
-  if (!hasToolCall && !hasBotToolCall && !hasFcTag && !hasCallFormat) return null;
+  if (!hasToolCall && !hasBotToolCall && !hasFcTag && !hasFunctionCallTag && !hasCallFormat) return null;
 
   const toolCalls = [];
   let format = null;
@@ -270,7 +271,40 @@ function extractTextToolCalls(text) {
     }
   }
 
-  // Format 3: call:name{args} format (e.g., "call:read{path:\"/app/SKILL.md\"}")
+  // Format 3: <function_call>...</function_call> tags
+  if (toolCalls.length === 0 && hasFunctionCallTag) {
+    const funcRegex = /<function_call>([\s\S]*?)<\/function_call>/g;
+    let match;
+    while ((match = funcRegex.exec(text)) !== null) {
+      try {
+        const jsonContent = match[1].trim();
+        const parsed = JSON.parse(jsonContent);
+
+        if (parsed.name) {
+          // Handle arguments as string (already JSON stringified) or object
+          let args = parsed.arguments || parsed.args || {};
+          if (typeof args === "string") {
+            try {
+              args = JSON.parse(args);
+            } catch {
+              // Keep as-is if parsing fails
+            }
+          }
+          toolCalls.push({
+            name: parsed.name,
+            args
+          });
+          format = "function_call";
+        } else {
+          logStructured("WARN", "ToolCall", "Parsed <function_call> tool call missing required 'name' field", { parsed: truncateForLog(parsed, 500) });
+        }
+      } catch (e) {
+        logStructured("WARN", "ToolCall", "Failed to parse <function_call> JSON", { error: e?.message, content: match[1]?.substring(0, 200) });
+      }
+    }
+  }
+
+  // Format 4: call:name{args} format (e.g., "call:read{path:\"/app/SKILL.md\"}")
   if (toolCalls.length === 0 && hasCallFormat) {
     const callRegex = /call:(\w+)\s*\{([^}]*)\}/g;
     let match;
