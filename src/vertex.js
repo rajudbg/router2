@@ -10,8 +10,8 @@ const ENABLE_SMART_ROUTING = String(process.env.ENABLE_SMART_ROUTING || "true").
 const SMART_ROUTING_FALLBACK_DELAY_MS = 500;
 
 const MODEL_FALLBACK_CHAINS = {
-  "gemini-3.0-flash-preview": ["gemini-3.0-flash-preview", "gemini-3.1-pro-preview"],
-  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3.0-flash-preview"]
+  "gemini-3-flash-preview": ["gemini-3-flash-preview", "gemini-3.1-pro-preview"],
+  "gemini-3.1-pro-preview": ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]
 };
 
 const { PredictionServiceClient } = v1;
@@ -127,15 +127,44 @@ async function withRetry(operation) {
   throw toVertexRequestError(lastError);
 }
 
+function getFinishReason(response) {
+  const candidates = response?.candidates ?? [];
+  const firstCandidate = candidates[0];
+  return firstCandidate?.finishReason || "";
+}
+
+function getFinishMessage(response) {
+  const candidates = response?.candidates ?? [];
+  const firstCandidate = candidates[0];
+  return firstCandidate?.finishMessage || "";
+}
+
+function isErrorFinishReason(finishReason) {
+  const errorReasons = [
+    "MALFORMED_FUNCTION_CALL",
+    "RECITATION",
+    "SAFETY",
+    "OTHER"
+  ];
+  return errorReasons.includes(finishReason);
+}
+
 function extractResponseText(response) {
   const candidates = response?.candidates ?? [];
   const firstCandidate = candidates[0];
   const parts = firstCandidate?.content?.parts ?? [];
 
-  const text = parts
-    .map((part) => part?.text)
-    .filter((value) => typeof value === "string")
-    .join("");
+  let text = "";
+  for (const part of parts) {
+    if (part.text) {
+      text += part.text;
+    }
+  }
+
+  const finishReason = getFinishReason(response);
+  if (isErrorFinishReason(finishReason)) {
+    return ERROR_FALLBACK_TEXT;
+  }
 
   return text || SAFE_FALLBACK_TEXT;
 }
@@ -346,6 +375,14 @@ export async function generateTextFromVertex(contents, model) {
   const fallbackUsed = actualModel !== resolvedModel;
 
   logStructured("DEBUG", "Gemini Raw", "Response received", { model: actualModel, requestedModel: resolvedModel, fallbackUsed, latencyMs, raw: truncateForLog(response) });
+
+  const finishReason = getFinishReason(response);
+  const finishMessage = getFinishMessage(response);
+
+  if (isErrorFinishReason(finishReason)) {
+    logStructured("ERROR", "Vertex", `Error finish reason: ${finishReason}`, { model: actualModel, requestedModel: resolvedModel, finishReason, finishMessage, fallbackUsed });
+    return { type: "text", text: `Model error: ${finishReason}. ${finishMessage || ERROR_FALLBACK_TEXT}`, isError: true, model: actualModel, fallbackUsed };
+  }
 
   const functionCalls = extractFunctionCalls(response);
   if (functionCalls.length > 0) {
