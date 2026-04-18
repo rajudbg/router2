@@ -211,9 +211,10 @@ function extractTextToolCalls(text) {
 
   const hasToolCall = text.includes("<tool_call>");
   const hasBotToolCall = text.includes("<bot_tool_call>");
+  const hasFcTag = text.includes("<fc>");
   const hasCallFormat = text.includes("call:") || text.match(/call\s*\{/);
 
-  if (!hasToolCall && !hasBotToolCall && !hasCallFormat) return null;
+  if (!hasToolCall && !hasBotToolCall && !hasFcTag && !hasCallFormat) return null;
 
   const toolCalls = [];
   let format = null;
@@ -245,7 +246,31 @@ function extractTextToolCalls(text) {
     }
   }
 
-  // Format 2: call:name{args} format (e.g., "call:read{path:\"/app/SKILL.md\"}")
+  // Format 2: <fc>...</fc> tags (function call shorthand)
+  if (toolCalls.length === 0 && hasFcTag) {
+    const fcRegex = /<fc>([\s\S]*?)<\/fc>/g;
+    let match;
+    while ((match = fcRegex.exec(text)) !== null) {
+      try {
+        const jsonContent = match[1].trim();
+        const parsed = JSON.parse(jsonContent);
+
+        if (parsed.name) {
+          toolCalls.push({
+            name: parsed.name,
+            args: parsed.arguments || parsed.args || {}
+          });
+          format = "fc";
+        } else {
+          logStructured("WARN", "ToolCall", "Parsed <fc> tool call missing required 'name' field", { parsed: truncateForLog(parsed, 500) });
+        }
+      } catch (e) {
+        logStructured("WARN", "ToolCall", "Failed to parse <fc> JSON", { error: e?.message, content: match[1]?.substring(0, 200) });
+      }
+    }
+  }
+
+  // Format 3: call:name{args} format (e.g., "call:read{path:\"/app/SKILL.md\"}")
   if (toolCalls.length === 0 && hasCallFormat) {
     const callRegex = /call:(\w+)\s*\{([^}]*)\}/g;
     let match;
