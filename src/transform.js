@@ -112,19 +112,87 @@ function extractTextAndImageUrls(content) {
 }
 
 export async function toVertexRequest(body) {
-  const { messages, model } = body ?? {};
+  const { messages, model, tools } = body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error("Invalid request: messages must be a non-empty array");
   }
 
   const contents = [];
+  let systemInstruction = undefined;
+
+  let vertexTools = undefined;
+  if (Array.isArray(tools) && tools.length > 0) {
+    const functionDeclarations = tools
+      .filter((t) => t.type === "function" && t.function)
+      .map((t) => ({
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters
+      }));
+    if (functionDeclarations.length > 0) {
+      vertexTools = [{ functionDeclarations }];
+    }
+  }
 
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
 
+    if (message.role === "system") {
+      const { textSegments } = extractTextAndImageUrls(message.content);
+      if (textSegments.length > 0) {
+        const text = textSegments.join("\n");
+        if (!systemInstruction) {
+          systemInstruction = { parts: [{ text }] };
+        } else {
+          systemInstruction.parts[0].text += "\n" + text;
+        }
+      }
+      continue;
+    }
+
     const role = message.role === "assistant" ? "model" : "user";
-    const { textSegments, imageUrls } = extractTextAndImageUrls(message.content);
     const parts = [];
+
+    if (message.role === "tool") {
+      let responseObj = {};
+      try {
+        responseObj = JSON.parse(message.content);
+      } catch (e) {
+        responseObj = { result: message.content };
+      }
+      
+      parts.push({
+        functionResponse: {
+          name: message.name || message.tool_call_id || "function",
+          response: responseObj
+        }
+      });
+      contents.push({ role: "user", parts });
+      continue;
+    }
+
+    if (message.tool_calls && Array.isArray(message.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        if (tc.type === "function" && tc.function) {
+          let args = {};
+          try {
+            args = typeof tc.function.arguments === "string" 
+              ? JSON.parse(tc.function.arguments) 
+              : tc.function.arguments;
+          } catch (e) {
+            // failed to parse args, leave empty
+          }
+          parts.push({
+            functionCall: {
+              name: tc.function.name,
+              args
+            }
+          });
+        }
+      }
+    }
+
+    const { textSegments, imageUrls } = extractTextAndImageUrls(message.content);
 
     if (textSegments.length > 0) {
       parts.push({ text: textSegments.join("\n") });
@@ -149,24 +217,53 @@ export async function toVertexRequest(body) {
     }
   }
 
-  if (contents.length === 0) {
+  if (contents.length === 0 && !systemInstruction) {
     throw new Error("Invalid request: no valid message content");
   }
 
   return {
     model: typeof model === "string" && model.trim() ? model.trim() : undefined,
-    contents
+    contents,
+    systemInstruction,
+    tools: vertexTools
   };
 }
 
-export function toOpenAIResponse(text) {
+export function toOpenAIResponse({ text, toolCalls }) {
+  const message = {
+    role: "assistant",
+    content: text ?? ""
+  };
+
+  let finishReason = "stop";
+
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+    message.tool_calls = toolCalls.map((tc, index) => {
+      const id = `call_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 7)}`;
+      return {
+        id,
+        type: "function",
+        function: {
+          name: tc.name,
+          arguments: typeof tc.args === "object" ? JSON.stringify(tc.args) : (tc.args || "{}")
+        }
+      };
+    });
+    finishReason = "tool_calls";
+    if (message.content === "") {
+      message.content = null;
+    }
+  }
+
   return {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
     choices: [
       {
-        message: {
-          role: "assistant",
-          content: text ?? ""
-        }
+        index: 0,
+        message,
+        finish_reason: finishReason
       }
     ]
   };

@@ -34,7 +34,7 @@ function writeSseData(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function streamOpenAIChatResponse(res, { content, model }) {
+function streamOpenAIChatResponse(res, { content, toolCalls, model }) {
   const id = `chatcmpl-${Date.now()}`;
   const created = Math.floor(Date.now() / 1000);
   const modelName = model || process.env.GEMINI_FLASH_MODEL || "gemini-2.5-flash";
@@ -52,6 +52,35 @@ function streamOpenAIChatResponse(res, { content, model }) {
       }
     ]
   });
+
+  if (toolCalls && toolCalls.length > 0) {
+    const formattedToolCalls = toolCalls.map((tc, index) => {
+      const callId = `call_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 7)}`;
+      return {
+        index,
+        id: callId,
+        type: "function",
+        function: {
+          name: tc.name,
+          arguments: typeof tc.args === "object" ? JSON.stringify(tc.args) : (tc.args || "{}")
+        }
+      };
+    });
+
+    writeSseData(res, {
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: { tool_calls: formattedToolCalls },
+          finish_reason: null
+        }
+      ]
+    });
+  }
 
   if (content) {
     writeSseData(res, {
@@ -78,7 +107,7 @@ function streamOpenAIChatResponse(res, { content, model }) {
       {
         index: 0,
         delta: {},
-        finish_reason: "stop"
+        finish_reason: (toolCalls && toolCalls.length > 0) ? "tool_calls" : "stop"
       }
     ]
   });
@@ -107,10 +136,7 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
     }
 
     const vertexPayload = await toVertexRequest(req.body);
-    const content = await generateTextFromVertex(
-      vertexPayload.contents,
-      vertexPayload.model
-    );
+    const result = await generateTextFromVertex(vertexPayload);
     res.set("x-router2-route", "gemini-chat");
 
     if (req.body?.stream === true) {
@@ -119,13 +145,14 @@ app.post("/v1/chat/completions", validateApiKey, async (req, res) => {
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders?.();
       streamOpenAIChatResponse(res, {
-        content,
+        content: result.text,
+        toolCalls: result.toolCalls,
         model: vertexPayload.model
       });
       return;
     }
 
-    return res.json(toOpenAIResponse(content));
+    return res.json(toOpenAIResponse({ text: result.text, toolCalls: result.toolCalls }));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("Vertex chat error:", error);

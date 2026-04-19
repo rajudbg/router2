@@ -95,6 +95,26 @@ function extractResponseText(response) {
   return text || "";
 }
 
+function extractVertexResponse(response) {
+  const candidates = response?.candidates ?? [];
+  const firstCandidate = candidates[0];
+  const parts = firstCandidate?.content?.parts ?? [];
+
+  const text = parts
+    .map((part) => part?.text)
+    .filter((value) => typeof value === "string")
+    .join("");
+
+  const toolCalls = parts
+    .filter((part) => part?.functionCall)
+    .map((part) => part.functionCall);
+
+  return {
+    text: text || "",
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined
+  };
+}
+
 export async function generateFromVertex(contents) {
   const client = createClient();
 
@@ -149,11 +169,13 @@ export function modelSupportsImageGeneration(model) {
   return isImagenModel(model) || isGeminiFamilyModel(model);
 }
 
-export async function generateTextFromVertex(contents, model) {
+export async function generateTextFromVertex({ contents, model, systemInstruction, tools }) {
   const client = createClient();
   const request = {
     model: getModelPath(model),
-    contents
+    contents,
+    ...(systemInstruction ? { systemInstruction } : {}),
+    ...(tools ? { tools } : {})
   };
 
   const [response] = await withRetry(() =>
@@ -162,7 +184,7 @@ export async function generateTextFromVertex(contents, model) {
     })
   );
 
-  return extractResponseText(response);
+  return extractVertexResponse(response);
 }
 
 async function generateWithGeminiImage(client, prompt, n, model) {
