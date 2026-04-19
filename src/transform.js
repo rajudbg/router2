@@ -1,3 +1,5 @@
+import { helpers } from "@google-cloud/aiplatform";
+
 const REQUEST_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 20_000);
 const STRICT_IMAGE_MODE = String(process.env.STRICT_IMAGE_MODE || "false").toLowerCase() === "true";
 const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
@@ -263,7 +265,7 @@ export function toOpenAIResponse({ text, toolCalls }) {
         type: "function",
         function: {
           name: tc.name,
-          arguments: typeof tc.args === "object" ? JSON.stringify(tc.args) : (tc.args || "{}")
+          arguments: typeof tc.args === "object" ? JSON.stringify(helpers.fromValue(tc.args)) : (tc.args || "{}")
         }
       };
     });
