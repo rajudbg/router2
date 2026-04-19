@@ -1,6 +1,6 @@
 import { helpers, v1 } from "@google-cloud/aiplatform";
 
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 const RETRYABLE_ERROR_CODES = new Set([4, 8, 13, 14]);
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 500;
