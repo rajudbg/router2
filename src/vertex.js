@@ -46,17 +46,23 @@ function sleep(ms) {
   });
 }
 
-function toVertexRequestError(error) {
+export function toVertexRequestError(error) {
   const providerCode = error?.code;
   const statusCode = providerCode === 8 ? 429 : 503;
-  const details =
-    typeof error?.details === "string" && error.details.trim()
-      ? error.details.trim()
-      : error instanceof Error
-        ? error.message
-        : "Vertex request failed";
 
-  return new VertexRequestError(details, statusCode, providerCode);
+  if (statusCode === 429) {
+    return new VertexRequestError(
+      `Vertex rate limit exceeded. Retry shortly. (${error?.message || "unknown"})`,
+      429,
+      providerCode
+    );
+  }
+
+  return new VertexRequestError(
+    `Vertex failed: ${error?.message || "unknown"}`,
+    503,
+    providerCode
+  );
 }
 
 async function withRetry(operation) {
