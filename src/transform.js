@@ -111,6 +111,24 @@ function extractTextAndImageUrls(content) {
   return { textSegments, imageUrls };
 }
 
+function convertSchema(obj) {
+  if (Array.isArray(obj)) {
+    return obj.map(convertSchema);
+  }
+  if (obj !== null && typeof obj === "object") {
+    const newObj = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === "type" && typeof v === "string") {
+        newObj[k] = v.toUpperCase();
+      } else {
+        newObj[k] = convertSchema(v);
+      }
+    }
+    return newObj;
+  }
+  return obj;
+}
+
 export async function toVertexRequest(body) {
   const { messages, model, tools } = body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -126,8 +144,8 @@ export async function toVertexRequest(body) {
       .filter((t) => t.type === "function" && t.function)
       .map((t) => ({
         name: t.function.name,
-        description: t.function.description,
-        parameters: t.function.parameters
+        description: t.function.description || "",
+        parameters: convertSchema(t.function.parameters)
       }));
     if (functionDeclarations.length > 0) {
       vertexTools = [{ functionDeclarations }];
