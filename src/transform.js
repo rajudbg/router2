@@ -1,5 +1,3 @@
-import { helpers } from "@google-cloud/aiplatform";
-
 const REQUEST_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 20_000);
 const STRICT_IMAGE_MODE = String(process.env.STRICT_IMAGE_MODE || "false").toLowerCase() === "true";
 const MAX_IMAGE_BYTES = Number(process.env.MAX_IMAGE_BYTES || 10 * 1024 * 1024);
@@ -256,6 +254,23 @@ export async function toVertexRequest(body) {
 }
 
 export function toOpenAIResponse({ text, toolCalls }) {
+  function unwrapVertexArgs(obj) {
+    if (obj === null || typeof obj !== "object") return obj;
+    if (Array.isArray(obj)) return obj.map(unwrapVertexArgs);
+    if (obj.stringValue !== undefined) return obj.stringValue;
+    if (obj.numberValue !== undefined) return obj.numberValue;
+    if (obj.boolValue !== undefined) return obj.boolValue;
+    if (obj.nullValue !== undefined) return null;
+    if (obj.listValue !== undefined) return unwrapVertexArgs(obj.listValue.values || []);
+    if (obj.structValue !== undefined) return unwrapVertexArgs(obj.structValue.fields || {});
+    if (obj.fields) return unwrapVertexArgs(obj.fields);
+    
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = unwrapVertexArgs(v);
+    }
+    return out;
+  }
   const message = {
     role: "assistant",
     content: text ?? ""
@@ -271,7 +286,7 @@ export function toOpenAIResponse({ text, toolCalls }) {
         type: "function",
         function: {
           name: tc.name,
-          arguments: typeof tc.args === "object" ? JSON.stringify(helpers.fromValue(tc.args)) : (tc.args || "{}")
+          arguments: typeof tc.args === "object" ? JSON.stringify(unwrapVertexArgs(tc.args)) : (tc.args || "{}")
         }
       };
     });

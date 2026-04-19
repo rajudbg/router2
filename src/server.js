@@ -1,5 +1,4 @@
 import "dotenv/config";
-import { helpers } from "@google-cloud/aiplatform";
 import express from "express";
 import { bootstrapGoogleCredentials } from "./bootstrapCredentials.js";
 import { validateApiKey } from "./auth.js";
@@ -63,7 +62,7 @@ function streamOpenAIChatResponse(res, { content, toolCalls, model }) {
         type: "function",
         function: {
           name: tc.name,
-          arguments: typeof tc.args === "object" ? JSON.stringify(helpers.fromValue(tc.args)) : (tc.args || "{}")
+          arguments: typeof tc.args === "object" ? JSON.stringify(tc.args) : (tc.args || "{}")
         }
       };
     });
