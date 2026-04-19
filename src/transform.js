@@ -112,18 +112,17 @@ function extractTextAndImageUrls(content) {
 }
 
 function convertSchema(obj) {
-  if (Array.isArray(obj)) {
-    return obj.map(convertSchema);
-  }
+  if (Array.isArray(obj)) return obj.map(convertSchema);
   if (obj !== null && typeof obj === "object") {
     const newObj = {};
+    const allowedKeys = new Set([
+      "type", "format", "description", "nullable", "enum", 
+      "properties", "required", "items"
+    ]);
+    
     for (const [k, v] of Object.entries(obj)) {
-      if (k === "additionalProperties" && typeof v === "boolean") {
-        continue;
-      }
-      if (k === "strict" && typeof v === "boolean") {
-        continue;
-      }
+      if (!allowedKeys.has(k)) continue;
+      
       if (k === "type" && typeof v === "string") {
         newObj[k] = v.toUpperCase();
       } else {
