@@ -118,6 +118,7 @@ function convertSchema(obj) {
     for (const [k, v] of Object.entries(obj)) {
       if (k === "additionalProperties" && typeof v === "boolean") continue;
       if (k === "strict" && typeof v === "boolean") continue;
+      if (k === "default" || k === "example" || k === "examples") continue;
       
       if (k === "type" && typeof v === "string") {
         newObj[k] = v.toUpperCase();
