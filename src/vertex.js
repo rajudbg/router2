@@ -26,7 +26,8 @@ function getModelPath(model) {
   }
 
   const chosenModel = model || defaultModel;
-  return `projects/${projectId}/locations/${location}/publishers/google/models/${chosenModel}`;
+  const locationPath = location === "global" ? "global" : `locations/${location}`;
+  return `projects/${projectId}/${locationPath}/publishers/google/models/${chosenModel}`;
 }
 
 function createClient() {
@@ -35,9 +36,11 @@ function createClient() {
     throw new Error("Missing LOCATION environment variable");
   }
 
-  return new PredictionServiceClient({
-    apiEndpoint: `${location}-aiplatform.googleapis.com`
-  });
+  const apiEndpoint = location === "global" 
+    ? "aiplatform.googleapis.com" 
+    : `${location}-aiplatform.googleapis.com`;
+
+  return new PredictionServiceClient({ apiEndpoint });
 }
 
 function sleep(ms) {
@@ -224,7 +227,8 @@ async function generateWithImagen(client, prompt, n, model) {
   const location = process.env.LOCATION;
   const imagenModel = model || process.env.IMAGEN_MODEL || "imagen-3.0-generate-002";
 
-  const endpoint = `projects/${projectId}/locations/${location}/publishers/google/models/${imagenModel}`;
+  const locationPath = location === "global" ? "global" : `locations/${location}`;
+  const endpoint = `projects/${projectId}/${locationPath}/publishers/google/models/${imagenModel}`;
   const request = {
     endpoint,
     instances: [helpers.toValue({ prompt })],
