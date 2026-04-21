@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
 import { bootstrapGoogleCredentials } from "./bootstrapCredentials.js";
 import { validateApiKey } from "./auth.js";
 import {
@@ -23,6 +24,7 @@ const debugErrors =
 
 bootstrapGoogleCredentials();
 
+app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
 function classifyImageRoute(model) {
